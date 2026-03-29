@@ -35,13 +35,24 @@ def get_transcript(
     if API_KEY and key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+    # Legacy YouTube language codes (YouTube uses old ISO codes for some languages)
+    LEGACY_LANGS = {"he": "iw", "id": "in", "yi": "ji"}
+
     try:
         ytt = YouTubeTranscriptApi()
 
-        # Try fetching with preferred language first
+        # Try fetching with preferred language first, including legacy variants
         langs_to_try = [lang]
+        if lang in LEGACY_LANGS:
+            langs_to_try.append(LEGACY_LANGS[lang])
         if lang != "en":
             langs_to_try.append("en")
+        # Always try common legacy codes
+        for modern, legacy in LEGACY_LANGS.items():
+            if modern not in langs_to_try:
+                langs_to_try.append(modern)
+            if legacy not in langs_to_try:
+                langs_to_try.append(legacy)
 
         transcript = None
         last_error = None
