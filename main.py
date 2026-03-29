@@ -6,7 +6,7 @@ from youtube_transcript_api._errors import (
     NoTranscriptFound,
     VideoUnavailable,
 )
-import os
+import os, traceback
 
 app = FastAPI(title="Yedapo YouTube Transcripts")
 
@@ -37,52 +37,66 @@ def get_transcript(
 
     try:
         ytt = YouTubeTranscriptApi()
-        transcript_list = ytt.list_transcripts(video_id)
 
-        # Try requested language first, then any available
+        # Try fetching with preferred language first
+        langs_to_try = [lang]
+        if lang != "en":
+            langs_to_try.append("en")
+
         transcript = None
-        try:
-            transcript = transcript_list.find_transcript([lang])
-        except NoTranscriptFound:
-            pass
+        last_error = None
 
-        # Try English if not already requested
-        if not transcript and lang != "en":
+        # Method 1: Direct fetch with language preference
+        for try_lang in langs_to_try:
             try:
-                transcript = transcript_list.find_transcript(["en"])
-            except NoTranscriptFound:
-                pass
+                result = ytt.fetch(video_id, languages=[try_lang])
+                text = " ".join(s.text for s in result).strip()
+                if text:
+                    return {
+                        "video_id": video_id,
+                        "language": result.language_code,
+                        "is_generated": result.is_generated,
+                        "text": text,
+                        "segments": [
+                            {"text": s.text, "start": s.start, "duration": s.duration}
+                            for s in result
+                        ],
+                    }
+            except Exception as e:
+                last_error = e
+                continue
 
-        # Fall back to first available (manual or generated)
-        if not transcript:
+        # Method 2: List all transcripts and pick first available
+        try:
+            transcript_list = ytt.list_transcripts(video_id)
             for t in transcript_list:
-                transcript = t
-                break
+                result = t.fetch()
+                text = " ".join(s.text for s in result).strip()
+                if text:
+                    return {
+                        "video_id": video_id,
+                        "language": t.language_code,
+                        "is_generated": t.is_generated,
+                        "text": text,
+                        "segments": [
+                            {"text": s.text, "start": s.start, "duration": s.duration}
+                            for s in result
+                        ],
+                    }
+        except Exception as e:
+            last_error = e
 
-        if not transcript:
-            raise HTTPException(status_code=404, detail="No transcript found")
+        detail = str(last_error) if last_error else "No transcript found"
+        raise HTTPException(status_code=404, detail=detail)
 
-        snippets = transcript.fetch()
-        text = " ".join(s.text for s in snippets).strip()
-        
-        return {
-            "video_id": video_id,
-            "language": transcript.language_code,
-            "is_generated": transcript.is_generated,
-            "text": text,
-            "segments": [
-                {"text": s.text, "start": s.start, "duration": s.duration}
-                for s in snippets
-            ],
-        }
-
+    except HTTPException:
+        raise
     except TranscriptsDisabled:
         raise HTTPException(status_code=403, detail="Transcripts disabled for this video")
     except VideoUnavailable:
         raise HTTPException(status_code=404, detail="Video unavailable")
     except NoTranscriptFound:
         raise HTTPException(status_code=404, detail="No transcript found")
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        tb = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"{str(e)}\n{tb}")
