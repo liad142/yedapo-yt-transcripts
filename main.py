@@ -6,7 +6,8 @@ from youtube_transcript_api._errors import (
     NoTranscriptFound,
     VideoUnavailable,
 )
-import os, traceback
+import os, traceback, time, asyncio, random
+from collections import deque
 
 app = FastAPI(title="Yedapo YouTube Transcripts")
 
@@ -19,10 +20,54 @@ app.add_middleware(
 
 API_KEY = os.environ.get("API_KEY", "")
 
+# --- Rate Limiting ---
+# Track request timestamps to enforce spacing
+_request_times = deque(maxlen=100)
+MIN_DELAY_SECONDS = 3      # Minimum seconds between requests
+MAX_REQUESTS_PER_MINUTE = 8  # Max requests per rolling minute
+
+
+def _check_rate_limit():
+    """Enforce rate limiting to avoid YouTube IP bans."""
+    now = time.time()
+    
+    # Clean old entries (older than 60s)
+    while _request_times and now - _request_times[0] > 60:
+        _request_times.popleft()
+    
+    # Check per-minute limit
+    if len(_request_times) >= MAX_REQUESTS_PER_MINUTE:
+        wait_until = _request_times[0] + 60
+        wait_secs = wait_until - now
+        if wait_secs > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limited. Try again in {wait_secs:.0f}s",
+                headers={"Retry-After": str(int(wait_secs) + 1)},
+            )
+    
+    # Enforce minimum delay between requests
+    if _request_times:
+        elapsed = now - _request_times[-1]
+        if elapsed < MIN_DELAY_SECONDS:
+            sleep_time = MIN_DELAY_SECONDS - elapsed + random.uniform(0.5, 2.0)
+            time.sleep(sleep_time)
+    
+    # Add random jitter to look more human
+    time.sleep(random.uniform(0.3, 1.5))
+    
+    _request_times.append(time.time())
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    now = time.time()
+    recent = sum(1 for t in _request_times if now - t < 60)
+    return {
+        "status": "ok",
+        "requests_last_minute": recent,
+        "rate_limit": MAX_REQUESTS_PER_MINUTE,
+    }
 
 
 @app.get("/transcript/{video_id}")
@@ -35,26 +80,27 @@ def get_transcript(
     if API_KEY and key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    # Legacy YouTube language codes (YouTube uses old ISO codes for some languages)
+    # Enforce rate limiting BEFORE hitting YouTube
+    _check_rate_limit()
+
+    # Legacy YouTube language codes
     LEGACY_LANGS = {"he": "iw", "id": "in", "yi": "ji"}
 
     try:
         ytt = YouTubeTranscriptApi()
 
-        # Try fetching with preferred language first, including legacy variants
+        # Build language priority list
         langs_to_try = [lang]
         if lang in LEGACY_LANGS:
             langs_to_try.append(LEGACY_LANGS[lang])
         if lang != "en":
             langs_to_try.append("en")
-        # Always try common legacy codes
         for modern, legacy in LEGACY_LANGS.items():
             if modern not in langs_to_try:
                 langs_to_try.append(modern)
             if legacy not in langs_to_try:
                 langs_to_try.append(legacy)
 
-        transcript = None
         last_error = None
 
         # Method 1: Direct fetch with language preference
