@@ -79,7 +79,7 @@ def get_transcript(
 
         # Method 2: List all transcripts and pick first available
         try:
-            transcript_list = ytt.list_transcripts(video_id)
+            transcript_list = ytt.list(video_id)
             for t in transcript_list:
                 result = t.fetch()
                 text = " ".join(s.text for s in result).strip()
